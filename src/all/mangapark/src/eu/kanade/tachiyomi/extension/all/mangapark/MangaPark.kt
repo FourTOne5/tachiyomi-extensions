@@ -31,6 +31,8 @@ import rx.Observable
 import uy.kohesive.injekt.injectLazy
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
+import eu.kanade.tachiyomi.source.model.SManga.Companion
+import okhttp3.HttpUrl.Companion.toHttpUrl
 
 open class MangaPark(
     override val lang: String,
@@ -45,51 +47,114 @@ open class MangaPark(
 
     private val json: Json by injectLazy()
 
+    private val mpFilters = MangaParkFilters()
+
     override val client: OkHttpClient = network.cloudflareClient.newBuilder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    override fun latestUpdatesRequest(page: Int): Request {
-        return GET("$baseUrl/browse?sort=update&page=$page")
-    }
+    // Latest
+    override fun latestUpdatesRequest(page: Int): Request = GET("$baseUrl/browse?sort=update&page=$page")
 
-    override fun latestUpdatesSelector(): String {
-        return "div#subject-list div.col"
-    }
+    override fun latestUpdatesSelector(): String = "div#subject-list div.col"
+
+    override fun latestUpdatesNextPageSelector() = "div#mainer nav.d-none .pagination .page-item:last-of-type:not(.disabled)"
 
     override fun latestUpdatesFromElement(element: Element): SManga {
         return SManga.create().apply {
             setUrlWithoutDomain(element.select("a.fw-bold").attr("href"))
             title = element.select("a.fw-bold").text()
             thumbnail_url = element.select("a.position-relative img").attr("abs:src")
+            author = element.select("div.autarts").text().split("/")
+                .joinToString(", ") { it.trim() }
+            genre = element.select("div.genres").select("span, u")
+                .joinToString(", ") { it.text().trim() }
         }
     }
 
-    override fun latestUpdatesNextPageSelector() = "div#mainer nav.d-none .pagination .page-item:last-of-type:not(.disabled)"
 
-    override fun popularMangaRequest(page: Int): Request {
-        return GET("$baseUrl/browse?sort=d007&page=$page")
+    // Popular
+    override fun popularMangaRequest(page: Int): Request = GET("$baseUrl/browse?sort=d007&page=$page")
+
+    override fun popularMangaSelector(): String = latestUpdatesSelector()
+
+    override fun popularMangaNextPageSelector(): String = latestUpdatesNextPageSelector()
+
+    override fun popularMangaFromElement(element: Element): SManga = latestUpdatesFromElement(element)
+
+
+    // Search
+    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
+        return when {
+            query.startsWith(PREFIX_ID_SEARCH) -> fetchSearchIdManga(query.removePrefix(PREFIX_ID_SEARCH))
+            query.isNotBlank() -> fetchSearchManga(page, query)
+            else -> fetchGenreSearchManga(page, filters)
+        }
     }
 
-    override fun popularMangaSelector() = latestUpdatesSelector()
+    // Search With Manga ID
+    private fun fetchSearchIdManga(id: String): Observable<MangasPage> {
+        return client.newCall(GET("$baseUrl/comic/$id", headers))
+            .asObservableSuccess()
+            .map { response ->
+                MangasPage(listOf(mangaDetailsParse(response.asJsoup())), false)
+            }
+    }
 
-    override fun popularMangaFromElement(element: Element) = latestUpdatesFromElement(element)
+    // Search WIth Query
+    private fun fetchSearchManga(page: Int, query: String): Observable<MangasPage> {
+        return client.newCall(GET("$baseUrl/search?word=$query&page=$page", headers))
+            .asObservableSuccess()
+            .map { response ->
+                searchMangaParse(response, false)
+            }
+    }
 
-    override fun popularMangaNextPageSelector() = latestUpdatesNextPageSelector()
+    // Search With filter
+    private fun fetchGenreSearchManga(page: Int, filters: FilterList): Observable<MangasPage> {
+        var url = "$baseUrl/browse".toHttpUrl().newBuilder()
 
-    override fun fetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
+        return client.newCall(GET(mpFilters.addFiltersToUrl(url, page, filters), headers))
+            .asObservableSuccess()
+            .map { response ->
+                searchMangaParse(response, true)
+            }
+    }
+
+    private fun searchMangaSelector(genreSearch: Boolean): String {
+        return when(genreSearch) {
+            false -> "div#search-list div.col"
+            true -> latestUpdatesSelector()
+        }
+    }
+
+    private fun searchMangaNextPageSelector(genreSearch: Boolean) = latestUpdatesNextPageSelector()
+
+    private fun searchMangaParse(response: Response, genreSearch: Boolean): MangasPage {
+        val document = response.asJsoup()
+
+        val mangas = document.select(searchMangaSelector(genreSearch)).map { element ->
+            searchMangaFromElement(element)
+        }
+
+        val hasNextPage = searchMangaNextPageSelector(genreSearch)?.let { selector ->
+            document.select(selector).first()
+        } != null
+
+        return MangasPage(mangas, hasNextPage)
+    }
+
+
+    fun ggfetchSearchManga(page: Int, query: String, filters: FilterList): Observable<MangasPage> {
         return when {
             query.startsWith(PREFIX_ID_SEARCH) -> {
                 val id = query.removePrefix(PREFIX_ID_SEARCH)
-                client.newCall(GET("$baseUrl/comic/$id", headers)).asObservableSuccess()
-                    .map { response ->
-                        mangaFromID(response, id)
-                    }
+
             }
 
             query.isNotBlank() -> {
-                val url = "$baseUrl/search?word=$query&page=$page"
+                val url = ""
                 client.newCall(GET(url, headers)).asObservableSuccess()
                     .map { response ->
                         searchMangaParse(response)
@@ -161,24 +226,26 @@ open class MangaPark(
 
     override fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = throw UnsupportedOperationException("Not used")
 
-    override fun searchMangaSelector() = "div#search-list div.col"
+
 
     override fun searchMangaFromElement(element: Element) = latestUpdatesFromElement(element)
 
-    override fun searchMangaNextPageSelector() = latestUpdatesNextPageSelector()
+
+
 
     override fun mangaDetailsParse(document: Document): SManga {
         val infoElement = document.select("div#mainer div.container-fluid")
-        val statusStr = infoElement.select("div.attr-item:contains(status) span").text()
 
         return SManga.create().apply {
+            setUrlWithoutDomain(infoElement.select("h3.item-title a").attr("href"))
             title = infoElement.select("h3.item-title").text()
             description = infoElement.select("div.limit-height-body")
                 .select("h5.text-muted, div.limit-html")
                 .joinToString("\n\n") { it.text() }
             author = infoElement.select("div.attr-item:contains(author) a")
                 .joinToString { it.text().trim() }
-            status = statusStr.parseStatus()
+            status = infoElement.select("div.attr-item:contains(status) span")
+                .text().parseStatus()
             thumbnail_url = infoElement.select("div.detail-set div.attr-cover img").attr("abs:src")
             genre = infoElement.select("div.attr-item:contains(genres) span span")
                 .joinToString { it.text().trim() }
@@ -303,20 +370,13 @@ open class MangaPark(
         ).execute().body!!.string()
     }
 
+    override fun searchMangaParse(response: Response): MangasPage = throw UnsupportedOperationException("Not used")
+
     override fun imageUrlParse(document: Document): String = throw UnsupportedOperationException("Not used")
 
-    override fun getFilterList() = FilterList(
-        // LetterFilter(),
-        Filter.Header("NOTE: Ignored if using text search!"),
-        Filter.Separator(),
-        SortFilter(getSortFilter(), 10),
-        ReverseSortFilter(),
-        StatusFilter(getStatusFilter(), 0),
-        MinChapterTextFilter(),
-        MaxChapterTextFilter(),
-        GenreGroupFilter(getGenreFilter()),
-    )
+    override fun getFilterList() = mpFilters.getFilterList()
 
+    /*
     class SelectFilterOption(val name: String, val value: String)
     class CheckboxFilterOption(val value: String, name: String, default: Boolean = false) : Filter.CheckBox(name, default)
     class TriStateFilterOption(val value: String, name: String, default: Int = 0) : Filter.TriState(name, default)
@@ -336,6 +396,7 @@ open class MangaPark(
         val excluded: List<String>
             get() = state.filter { it.isExcluded() }.map { it.value }
     }
+    */
     abstract class TextFilter(name: String) : Filter.Text(name)
 
     class SortFilter(options: List<SelectFilterOption>, default: Int) : SelectFilter("Sort By", options, default)
@@ -374,116 +435,10 @@ open class MangaPark(
     )
 
     private fun getGenreFilter() = listOf(
-        TriStateFilterOption("artbook", "Artbook"),
-        TriStateFilterOption("cartoon", "Cartoon"),
-        TriStateFilterOption("comic", "Comic"),
-        TriStateFilterOption("doujinshi", "Doujinshi"),
-        TriStateFilterOption("imageset", "Imageset"),
-        TriStateFilterOption("manga", "Manga"),
-        TriStateFilterOption("manhua", "Manhua"),
-        TriStateFilterOption("manhwa", "Manhwa"),
-        TriStateFilterOption("webtoon", "Webtoon"),
-        TriStateFilterOption("western", "Western"),
-        TriStateFilterOption("josei", "Josei"),
-        TriStateFilterOption("seinen", "Seinen"),
-        TriStateFilterOption("shoujo", "Shoujo"),
-        TriStateFilterOption("shoujo_ai", "Shoujo ai"),
-        TriStateFilterOption("shounen", "Shounen"),
-        TriStateFilterOption("shounen_ai", "Shounen ai"),
-        TriStateFilterOption("yaoi", "Yaoi"),
-        TriStateFilterOption("yuri", "Yuri"),
-        TriStateFilterOption("ecchi", "Ecchi"),
-        TriStateFilterOption("mature", "Mature"),
-        TriStateFilterOption("adult", "Adult"),
-        TriStateFilterOption("gore", "Gore"),
-        TriStateFilterOption("violence", "Violence"),
-        TriStateFilterOption("smut", "Smut"),
-        TriStateFilterOption("hentai", "Hentai"),
-        TriStateFilterOption("_4_koma", "4-Koma"),
-        TriStateFilterOption("action", "Action"),
-        TriStateFilterOption("adaptation", "Adaptation"),
-        TriStateFilterOption("adventure", "Adventure"),
-        TriStateFilterOption("aliens", "Aliens"),
-        TriStateFilterOption("animals", "Animals"),
-        TriStateFilterOption("anthology", "Anthology"),
-        TriStateFilterOption("cars", "cars"),
-        TriStateFilterOption("comedy", "Comedy"),
-        TriStateFilterOption("cooking", "Cooking"),
-        TriStateFilterOption("crime", "crime"),
-        TriStateFilterOption("crossdressing", "Crossdressing"),
-        TriStateFilterOption("delinquents", "Delinquents"),
-        TriStateFilterOption("dementia", "Dementia"),
-        TriStateFilterOption("demons", "Demons"),
-        TriStateFilterOption("drama", "Drama"),
-        TriStateFilterOption("fantasy", "Fantasy"),
-        TriStateFilterOption("fan_colored", "Fan-Colored"),
-        TriStateFilterOption("full_color", "Full Color"),
-        TriStateFilterOption("game", "Game"),
-        TriStateFilterOption("gender_bender", "Gender Bender"),
-        TriStateFilterOption("genderswap", "Genderswap"),
-        TriStateFilterOption("ghosts", "Ghosts"),
-        TriStateFilterOption("gyaru", "Gyaru"),
-        TriStateFilterOption("harem", "Harem"),
-        TriStateFilterOption("harlequin", "Harlequin"),
-        TriStateFilterOption("historical", "Historical"),
-        TriStateFilterOption("horror", "Horror"),
-        TriStateFilterOption("incest", "Incest"),
-        TriStateFilterOption("isekai", "Isekai"),
-        TriStateFilterOption("kids", "Kids"),
-        TriStateFilterOption("loli", "Loli"),
-        TriStateFilterOption("lolicon", "lolicon"),
-        TriStateFilterOption("magic", "Magic"),
-        TriStateFilterOption("magical_girls", "Magical Girls"),
-        TriStateFilterOption("martial_arts", "Martial Arts"),
-        TriStateFilterOption("mecha", "Mecha"),
-        TriStateFilterOption("medical", "Medical"),
-        TriStateFilterOption("military", "Military"),
-        TriStateFilterOption("monster_girls", "Monster Girls"),
-        TriStateFilterOption("monsters", "Monsters"),
-        TriStateFilterOption("music", "Music"),
-        TriStateFilterOption("mystery", "Mystery"),
-        TriStateFilterOption("netorare", "Netorare/NTR"),
-        TriStateFilterOption("ninja", "Ninja"),
-        TriStateFilterOption("office_workers", "Office Workers"),
-        TriStateFilterOption("oneshot", "Oneshot"),
-        TriStateFilterOption("parody", "parody"),
-        TriStateFilterOption("philosophical", "Philosophical"),
-        TriStateFilterOption("police", "Police"),
-        TriStateFilterOption("post_apocalyptic", "Post-Apocalyptic"),
-        TriStateFilterOption("psychological", "Psychological"),
-        TriStateFilterOption("reincarnation", "Reincarnation"),
-        TriStateFilterOption("reverse_harem", "Reverse Harem"),
-        TriStateFilterOption("romance", "Romance"),
-        TriStateFilterOption("samurai", "Samurai"),
-        TriStateFilterOption("school_life", "School Life"),
-        TriStateFilterOption("sci_fi", "Sci-Fi"),
-        TriStateFilterOption("shota", "Shota"),
-        TriStateFilterOption("shotacon", "shotacon"),
-        TriStateFilterOption("slice_of_life", "Slice of Life"),
-        TriStateFilterOption("sm_bdsm", "SM/BDSM"),
-        TriStateFilterOption("space", "Space"),
-        TriStateFilterOption("sports", "Sports"),
-        TriStateFilterOption("super_power", "Super Power"),
-        TriStateFilterOption("superhero", "Superhero"),
-        TriStateFilterOption("supernatural", "Supernatural"),
-        TriStateFilterOption("survival", "Survival"),
-        TriStateFilterOption("thriller", "Thriller"),
-        TriStateFilterOption("time_travel", "Time Travel"),
-        TriStateFilterOption("traditional_games", "Traditional Games"),
-        TriStateFilterOption("tragedy", "Tragedy"),
-        TriStateFilterOption("vampires", "Vampires"),
-        TriStateFilterOption("video_games", "Video Games"),
-        TriStateFilterOption("virtual_reality", "Virtual Reality"),
-        TriStateFilterOption("wuxia", "Wuxia"),
-        TriStateFilterOption("xianxia", "Xianxia"),
-        TriStateFilterOption("xuanhuan", "Xuanhuan"),
-        TriStateFilterOption("zombies", "Zombies"),
         // Hidden Genres
         TriStateFilterOption("award_winning", "Award Winning"),
-        TriStateFilterOption("youkai", "Youkai"),
-        TriStateFilterOption("uncategorized", "Uncategorized")
     )
-
+    */
     private inline fun <reified T> Iterable<*>.findInstance() = find { it is T } as? T
 
     companion object {

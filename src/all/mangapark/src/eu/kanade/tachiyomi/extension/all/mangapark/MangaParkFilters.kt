@@ -13,7 +13,7 @@ open class MangaParkFilters {
             getSortFilter(),
             getMinChapterFilter(),
             getMaxChapterFilter(),
-            getStatusFilter(),
+            getPublicationFilter(),
             getTypeFilter(),
             getDemographicFilter(),
             getContentFilter(),
@@ -24,19 +24,92 @@ open class MangaParkFilters {
     internal fun addFiltersToUrl(url: HttpUrl.Builder, page: Int, filters: FilterList): String {
         val includedGenre: MutableList<String> = mutableListOf()
         val excludedGenre: MutableList<String> = mutableListOf()
+        var sort: String? = null
+        var release: String? = null
+        val chapters: String?
+        val genres: String = includedGenre.joinToString(",") + "|" + excludedGenre.joinToString(",")
+
+        val minChapFilter = filters.findInstance<MinChapterTextFilter>()!!
+        val maxChapFilter = filters.findInstance<MaxChapterTextFilter>()!!
+
+        chapters = when {
+            minChapFilter.state.isNotEmpty() and maxChapFilter.state.isEmpty() -> minChapFilter.state
+            maxChapFilter.state.isNotEmpty() -> when {
+                minChapFilter.state.isNotEmpty() -> minChapFilter.state + "-" + maxChapFilter.state
+                else -> "0-" + maxChapFilter.state
+            }
+            else -> null
+        }
+
+        filters.forEach { filter ->
+            when (filter) {
+                is SortFilter -> {
+                    if (filter.state != null) {
+                        val sortValue = sortList[filter.state!!.index].value
+                        sort = when (filter.state!!.ascending) {
+                            true -> "$sortValue.az"
+                            else -> "$sortValue.za"
+
+                        }
+
+                    }
+                }
+                is TypeFilter -> {
+                    filter.state.forEach { tag ->
+                        if (tag.isIncluded()) {
+                            includedGenre.add(tag.value)
+                        } else if (tag.isExcluded()) {
+                            excludedGenre.add(tag.value)
+                        }
+                    }
+                }
+                is DemographicFilter -> {
+                    filter.state.forEach { tag ->
+                        if (tag.isIncluded()) {
+                            includedGenre.add(tag.value)
+                        } else if (tag.isExcluded()) {
+                            excludedGenre.add(tag.value)
+                        }
+                    }
+                }
+                is ContentFilter -> {
+                    filter.state.forEach { tag ->
+                        if (tag.isIncluded()) {
+                            includedGenre.add(tag.value)
+                        } else if (tag.isExcluded()) {
+                            excludedGenre.add(tag.value)
+                        }
+                    }
+                }
+                is GenreFilter -> {
+                    filter.state.forEach { tag ->
+                        if (tag.isIncluded()) {
+                            includedGenre.add(tag.value)
+                        } else if (tag.isExcluded()) {
+                            excludedGenre.add(tag.value)
+                        }
+                    }
+                }
+                is PublicationFilter -> {
+                    if (filter.state != 0) {
+                        release = publicationList[filter.state].value
+                    }
+                }
+            }
+        }
 
         return url.apply {
             addQueryParameter("page", page.toString())
-            addQueryParameter(
-                "genres",
-                includedGenre.joinToString(",") + "|" + excludedGenre.joinToString(",")
-            )
+            addQueryParameter("sort", sort)
+            addQueryParameter("genres", genres)
+            addQueryParameter("release", release)
+            addQueryParameter("chapters", chapters)
         }.toString()
 
     }
 
     // Sort Filter
-    class SortItem(val name: String, val value: String, val sortable: Boolean = true)
+    class SortItem(val name: String, val value: String)
 
     private val sortList: List<SortItem> = listOf(
         SortItem("Rating", "rating"),
@@ -45,16 +118,16 @@ open class MangaParkFilters {
         SortItem("Update", "update"),
         SortItem("Create", "create"),
         SortItem("Name", "name"),
-        SortItem("Total Views", "d000", false),
-        SortItem("Most Views 360 days", "d360", false),
-        SortItem("Most Views 180 days", "d180", false),
-        SortItem("Most Views 90 days", "d090", false),
-        SortItem("Most Views 30 days", "d030", false),
-        SortItem("Most Views 7 days", "d007", false),
-        SortItem("Most Views 24 hours", "h024", false),
-        SortItem("Most Views 12 hours", "h012", false),
-        SortItem("Most Views 6 hours", "h006", false),
-        SortItem("Most Views 60 minutes", "h001", false),
+        SortItem("Total Views", "d000"),
+        SortItem("Most Views 360 days", "d360"),
+        SortItem("Most Views 180 days", "d180"),
+        SortItem("Most Views 90 days", "d090"),
+        SortItem("Most Views 30 days", "d030"),
+        SortItem("Most Views 7 days", "d007"),
+        SortItem("Most Views 24 hours", "h024"),
+        SortItem("Most Views 12 hours", "h012"),
+        SortItem("Most Views 6 hours", "h006"),
+        SortItem("Most Views 60 minutes", "h001"),
     )
 
     class SortDefault(val defaultSort: SortItem, val ascending: Boolean)
@@ -62,7 +135,10 @@ open class MangaParkFilters {
     private val defaultSort: SortDefault = SortDefault(SortItem("Rating", "rating"), false)
 
     class SortFilter(name: String, default: SortDefault, sorts: List<SortItem>) :
-        Filter.Sort(name, sorts.map { it.name } .toTypedArray(), Selection(sorts.indexOf(default.defaultSort), default.ascending))
+        Filter.Sort(
+            name,
+            sorts.map { it.name }.toTypedArray(),
+            Selection(sorts.indexOf(default.defaultSort), default.ascending))
 
     private fun getSortFilter(): SortFilter = SortFilter("Sort By", defaultSort, sortList)
 
@@ -76,24 +152,33 @@ open class MangaParkFilters {
     private fun getMaxChapterFilter(): TextFilter = MaxChapterTextFilter()
 
 
-    // Status Filter
-    class StatusItem(name: String, val value: String): Filter.CheckBox(name)
+    // Publication Filter
+    class PublicationItem(val name: String, val value: String)
 
-    private val statusList: List<StatusItem> = listOf(
-            StatusItem("Pending", "pending"),
-            StatusItem("Ongoing", "ongoing"),
-            StatusItem("Completed", "completed"),
-            StatusItem("Hiatus", "hiatus"),
-            StatusItem("Cancelled", "cancelled"),
+    private val publicationList: List<PublicationItem> = listOf(
+        PublicationItem("All", ""),
+        PublicationItem("Pending", "pending"),
+        PublicationItem("Ongoing", "ongoing"),
+        PublicationItem("Completed", "completed"),
+        PublicationItem("Hiatus", "hiatus"),
+        PublicationItem("Cancelled", "cancelled"),
     )
 
-    class StatusFilter(name: String, statusList: List<StatusItem>) :
-        Filter.Group<StatusItem>(name, statusList)
+    class PublicationFilter(
+        name: String,
+        statusList: List<PublicationItem>,
+        defaultStatus: PublicationItem
+    ) :
+        Filter.Select<String>(
+            name,
+            statusList.map { it.name }.toTypedArray(),
+            statusList.indexOf(defaultStatus))
 
-    private fun getStatusFilter(): StatusFilter = StatusFilter("Status", statusList)
+    private fun getPublicationFilter(): PublicationFilter =
+        PublicationFilter("Status", publicationList, PublicationItem("All", ""))
 
     //Type
-    class TypeItem(name: String, val value: String): Filter.TriState(name)
+    class TypeItem(name: String, val value: String) : Filter.TriState(name)
 
     private val typeList: List<TypeItem> = listOf(
         TypeItem("Cartoon", "cartoon"),
@@ -111,7 +196,7 @@ open class MangaParkFilters {
     private fun getTypeFilter(): TypeFilter = TypeFilter("Type", typeList)
 
     //Demographic
-    class DemographicItem(name: String, val value: String): Filter.TriState(name)
+    class DemographicItem(name: String, val value: String) : Filter.TriState(name)
 
     private val demographicList: List<DemographicItem> = listOf(
         DemographicItem("Shounen", "shounen"),
@@ -123,10 +208,11 @@ open class MangaParkFilters {
     class DemographicFilter(name: String, demographicList: List<DemographicItem>) :
         Filter.Group<DemographicItem>(name, demographicList)
 
-    private fun getDemographicFilter(): DemographicFilter = DemographicFilter("Demographic", demographicList)
+    private fun getDemographicFilter(): DemographicFilter =
+        DemographicFilter("Demographic", demographicList)
 
     // Content
-    class ContentItem(name: String, val value: String): Filter.TriState(name)
+    class ContentItem(name: String, val value: String) : Filter.TriState(name)
 
     private val contentList: List<ContentItem> = listOf(
         ContentItem("Adult", "adult"),
@@ -143,7 +229,7 @@ open class MangaParkFilters {
     private fun getContentFilter(): ContentFilter = ContentFilter("Content", contentList)
 
     // Genre
-    class GenreItem(name: String, val value: String): Filter.TriState(name)
+    class GenreItem(name: String, val value: String) : Filter.TriState(name)
 
     private val genreList: List<GenreItem> = listOf(
         GenreItem("Action", "action"),
@@ -223,17 +309,10 @@ open class MangaParkFilters {
     class GenreFilter(name: String, genreList: List<GenreItem>) :
         Filter.Group<GenreItem>(name, genreList)
 
-    private fun getGenreFilter(): GenreFilter = GenreFilter("Demographic", genreList)
+    private fun getGenreFilter(): GenreFilter = GenreFilter("Genre", genreList)
 
+    //Helper
 
-
-
-
-
-
-
-
-
-
+    private inline fun <reified T> Iterable<*>.findInstance() = find { it is T } as? T
 
 }

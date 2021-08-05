@@ -1,0 +1,12 @@
+apply plugin: 'com.android.application'
+apply plugin: 'kotlin-android'
+
+ext {
+    extName = 'Manga King'
+    pkgNameSuffix = 'en.mangaking'
+    extClass = '.MangaKing'
+    extVersionCode = 1
+    libVersion = '1.2'
+}
+
+apply from: "$rootDir/common.gradle"
